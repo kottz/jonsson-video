@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
 
-const CURRENT_FORMAT: &str = "qoi"; // png/webp/qoi
+const CURRENT_FORMAT: &str = "png"; // png/webp/qoi
 
 const FRAMES_PER_SHEET: usize = 24;
 const FPS: f32 = 15.0;
@@ -22,8 +22,8 @@ struct CutscenePlayer {
     current_video: Option<usize>,
     sprite_sheets: VecDeque<Option<Texture2D>>,
     audio: Option<macroquad::audio::Sound>,
+    playback_start_time: Option<Instant>,
     current_frame: usize,
-    frame_timer: f32,
     is_playing: bool,
     loading: bool,
     loading_progress: f32,
@@ -41,7 +41,10 @@ impl CutscenePlayer {
             .into_iter()
             .map(|name| VideoMetadata {
                 name: name.to_string(),
-                base_path: format!("sheet_generator/movies/{}/sprite_sheets/{}", name, CURRENT_FORMAT),
+                base_path: format!(
+                    "sheet_generator/movies/{}/sprite_sheets/{}",
+                    name, CURRENT_FORMAT
+                ),
                 total_frames: 100 * FRAMES_PER_SHEET, // Assume 100 sheets max, update this if needed
             })
             .collect();
@@ -52,7 +55,7 @@ impl CutscenePlayer {
             sprite_sheets: VecDeque::new(),
             audio: None,
             current_frame: 0,
-            frame_timer: 0.0,
+            playback_start_time: None,
             is_playing: false,
             loading: false,
             loading_progress: 0.0,
@@ -70,10 +73,8 @@ impl CutscenePlayer {
         let base_path = self.videos[index].base_path.clone();
         let name = self.videos[index].name.clone();
 
-        // Count the number of sprite sheets
         let total_sheets = self.count_sprite_sheets(&base_path).await;
 
-        // Clear the screen once before starting the loading process
         clear_background(BLACK);
         self.draw_loading_screen(total_sheets);
         next_frame().await;
@@ -90,7 +91,6 @@ impl CutscenePlayer {
                     self.sprite_sheets.push_back(Some(texture));
                     self.loading_progress = (sheet_index + 1) as f32 / total_sheets as f32;
 
-                    // Update loading screen without clearing the background
                     self.draw_loading_screen(total_sheets);
                     next_frame().await;
                 }
@@ -98,17 +98,17 @@ impl CutscenePlayer {
             }
         }
 
-        // Update total frames based on actual loaded sheets
         self.videos[index].total_frames = self.sprite_sheets.len() * FRAMES_PER_SHEET;
 
-        let audio_path = Path::new("sheet_generator/movies").join(&name).join("audio.wav");
+        let audio_path = Path::new("sheet_generator/movies")
+            .join(&name)
+            .join("audio.wav");
         self.audio = macroquad::audio::load_sound(audio_path.to_str().unwrap())
             .await
             .ok();
 
         self.current_video = Some(index);
         self.current_frame = 0;
-        self.frame_timer = 0.0;
         self.is_playing = false;
         self.loading = false;
         self.loading_progress = 1.0;
@@ -137,7 +137,7 @@ impl CutscenePlayer {
     async fn start_playback(&mut self) {
         if let Some(_) = self.current_video {
             self.current_frame = 0;
-            self.frame_timer = 0.0;
+            self.playback_start_time = Some(Instant::now());
 
             // Start audio playback
             if let Some(audio) = &self.audio {
@@ -299,17 +299,18 @@ impl CutscenePlayer {
         }
     }
 
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self) {
         if self.is_playing {
-            self.frame_timer += dt;
-            while self.frame_timer >= FRAME_TIME {
-                self.frame_timer -= FRAME_TIME;
-                self.current_frame += 1;
+            if let Some(start_time) = self.playback_start_time {
+                let elapsed = start_time.elapsed();
+                let expected_frame = (elapsed.as_secs_f32() / FRAME_TIME).floor() as usize;
+
                 if let Some(video_index) = self.current_video {
                     let total_frames = self.videos[video_index].total_frames;
-                    if self.current_frame >= total_frames {
+                    if expected_frame >= total_frames {
                         self.stop();
-                        break;
+                    } else {
+                        self.current_frame = expected_frame;
                     }
                 }
             }
@@ -322,7 +323,7 @@ impl CutscenePlayer {
         }
         self.is_playing = false;
         self.current_frame = 0;
-        self.frame_timer = 0.0;
+        self.playback_start_time = None;
     }
 }
 
@@ -353,7 +354,7 @@ async fn main() {
             }
         }
 
-        player.update(get_frame_time());
+        player.update();
         player.draw();
 
         next_frame().await;
