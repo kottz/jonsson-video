@@ -1,8 +1,9 @@
 use macroquad::prelude::*;
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::Instant;
 
-const CURRENT_FORMAT: &str = "png"; // png/webp
+const CURRENT_FORMAT: &str = "webp"; // Change this to "png" to use PNG format
 
 const FRAMES_PER_SHEET: usize = 24;
 const FPS: f32 = 15.0;
@@ -26,6 +27,7 @@ struct CutscenePlayer {
     is_playing: bool,
     loading: bool,
     loading_progress: f32,
+    loading_start_time: Option<Instant>,
 }
 
 impl CutscenePlayer {
@@ -54,6 +56,7 @@ impl CutscenePlayer {
             is_playing: false,
             loading: false,
             loading_progress: 0.0,
+            loading_start_time: None,
         }
     }
 
@@ -62,6 +65,7 @@ impl CutscenePlayer {
         self.unload_current_video();
         self.loading = true;
         self.loading_progress = 0.0;
+        self.loading_start_time = Some(Instant::now());
 
         let base_path = self.videos[index].base_path.clone();
         let name = self.videos[index].name.clone();
@@ -109,11 +113,12 @@ impl CutscenePlayer {
         self.loading = false;
         self.loading_progress = 1.0;
 
-        // Clear the screen one last time after loading is complete
         clear_background(BLACK);
+        self.draw_loading_screen(total_sheets);
         next_frame().await;
 
-        true // Return true to indicate successful loading
+        self.loading_start_time = None;
+        true
     }
 
     async fn count_sprite_sheets(&self, base_path: &str) -> usize {
@@ -131,15 +136,8 @@ impl CutscenePlayer {
 
     async fn start_playback(&mut self) {
         if let Some(_) = self.current_video {
-            // Reset timing variables
             self.current_frame = 0;
             self.frame_timer = 0.0;
-
-            // Small delay to ensure everything is ready
-            let start_time = get_time();
-            while get_time() - start_time < 0.1 {
-                next_frame().await;
-            }
 
             // Start audio playback
             if let Some(audio) = &self.audio {
@@ -176,7 +174,6 @@ impl CutscenePlayer {
             }
         } else if self.is_playing {
             if let Some(_) = self.current_video {
-                // Changed to use underscore
                 let sheet_index = self.current_frame / FRAMES_PER_SHEET;
                 let frame_in_sheet = self.current_frame % FRAMES_PER_SHEET;
                 let row = frame_in_sheet / 3;
@@ -271,6 +268,25 @@ impl CutscenePlayer {
             font_size,
             WHITE,
         );
+
+        // Draw stopwatch
+        if let Some(start_time) = self.loading_start_time {
+            let elapsed = start_time.elapsed();
+            let stopwatch_text = format!(
+                "Time: {:02}:{:02}.{:03}",
+                elapsed.as_secs() / 60,
+                elapsed.as_secs() % 60,
+                elapsed.subsec_millis()
+            );
+            let stopwatch_dims = measure_text(&stopwatch_text, None, font_size as u16, 1.0);
+            draw_text(
+                &stopwatch_text,
+                (screen_width - stopwatch_dims.width) / 2.0,
+                bar_y + 40.0,
+                font_size,
+                WHITE,
+            );
+        }
     }
 
     async fn toggle(&mut self, video_index: usize) {
