@@ -7,7 +7,7 @@ const FPS: f32 = 15.0;
 const FRAME_TIME: f32 = 1.0 / FPS;
 const ORIGINAL_WIDTH: f32 = 600.0;
 const ORIGINAL_HEIGHT: f32 = 250.0;
-const PRELOAD_SHEETS: usize = 2;
+const PRELOAD_SHEETS: usize = 4;
 
 struct VideoMetadata {
     name: String,
@@ -54,21 +54,31 @@ impl CutscenePlayer {
         }
     }
 
-    async fn load_video(&mut self, index: usize) {
-        self.stop(); // This will stop any currently playing audio
+    async fn load_video(&mut self, index: usize) -> bool {
+        self.stop();
         self.unload_current_video();
 
-        let metadata = &self.videos[index];
-        let first_sheet_path = Path::new(&metadata.base_path).join("sprite_sheet_000.png");
-        let first_sheet = load_texture(first_sheet_path.to_str().unwrap()).await.ok();
-        self.sprite_sheets.push_back(first_sheet);
+        let base_path = self.videos[index].base_path.clone();
+        let name = self.videos[index].name.clone();
 
-        for _ in 1..100 {
-            // Assuming a maximum of 100 sprite sheets per video
-            self.sprite_sheets.push_back(None);
+        // Load all sprite sheets
+        self.sprite_sheets.clear();
+        let mut sheet_index = 0;
+        loop {
+            let path = Path::new(&base_path).join(format!("sprite_sheet_{:03}.png", sheet_index));
+            match load_texture(path.to_str().unwrap()).await {
+                Ok(texture) => {
+                    self.sprite_sheets.push_back(Some(texture));
+                    sheet_index += 1;
+                }
+                Err(_) => break,
+            }
         }
 
-        let audio_path = Path::new("movies").join(&metadata.name).join("audio.wav");
+        // Update total frames based on actual loaded sheets
+        self.videos[index].total_frames = self.sprite_sheets.len() * FRAMES_PER_SHEET;
+
+        let audio_path = Path::new("movies").join(&name).join("audio.wav");
         self.audio = macroquad::audio::load_sound(audio_path.to_str().unwrap())
             .await
             .ok();
@@ -76,29 +86,38 @@ impl CutscenePlayer {
         self.current_video = Some(index);
         self.current_frame = 0;
         self.frame_timer = 0.0;
-        self.is_playing = true;
+        self.is_playing = false;
 
-        // Preload the first few sprite sheets
-        for i in 1..=PRELOAD_SHEETS {
-            self.loading_queue.push_back(i);
-        }
-
-        // Play the audio
-        if let Some(audio) = &self.audio {
-            macroquad::audio::play_sound(
-                audio,
-                macroquad::audio::PlaySoundParams {
-                    looped: false,
-                    volume: 1.0,
-                },
-            );
-        }
+        true // Return true to indicate successful loading
     }
 
-    fn unload_current_video(&mut self) {
-        self.sprite_sheets.clear();
-    }
+    async fn start_playback(&mut self) {
+        if let Some(_) = self.current_video {
+            // Reset timing variables
+            self.current_frame = 0;
+            self.frame_timer = 0.0;
 
+            // Small delay to ensure everything is ready
+            let start_time = get_time();
+            while get_time() - start_time < 0.1 {
+                next_frame().await;
+            }
+
+            // Start audio playback
+            if let Some(audio) = &self.audio {
+                macroquad::audio::play_sound(
+                    audio,
+                    macroquad::audio::PlaySoundParams {
+                        looped: false,
+                        volume: 1.0,
+                    },
+                );
+            }
+
+            // Start video playback
+            self.is_playing = true;
+        }
+    }
     async fn load_next_texture(&mut self) {
         if let Some(sheet_index) = self.loading_queue.pop_front() {
             if let Some(video_index) = self.current_video {
@@ -114,29 +133,10 @@ impl CutscenePlayer {
         }
     }
 
-    fn update(&mut self, dt: f32) {
-        if self.is_playing {
-            self.frame_timer += dt;
-            if self.frame_timer >= FRAME_TIME {
-                self.frame_timer -= FRAME_TIME;
-                self.current_frame += 1;
-                if let Some(video_index) = self.current_video {
-                    let metadata = &self.videos[video_index];
-                    if self.current_frame >= metadata.total_frames {
-                        self.stop();
-                    } else {
-                        let current_sheet = self.current_frame / FRAMES_PER_SHEET;
-                        let sheets_to_load = current_sheet + PRELOAD_SHEETS;
-                        for sheet_index in current_sheet..=sheets_to_load {
-                            if sheet_index < self.sprite_sheets.len()
-                                && self.sprite_sheets[sheet_index].is_none()
-                            {
-                                self.loading_queue.push_back(sheet_index);
-                            }
-                        }
-                    }
-                }
-            }
+    fn unload_current_video(&mut self) {
+        self.sprite_sheets.clear();
+        if let Some(audio) = self.audio.take() {
+            macroquad::audio::stop_sound(&audio);
         }
     }
 
@@ -144,7 +144,8 @@ impl CutscenePlayer {
         clear_background(BLACK);
 
         if self.is_playing {
-            if let Some(_video_index) = self.current_video {
+            if let Some(_) = self.current_video {
+                // Changed to use underscore
                 let sheet_index = self.current_frame / FRAMES_PER_SHEET;
                 let frame_in_sheet = self.current_frame % FRAMES_PER_SHEET;
                 let row = frame_in_sheet / 3;
@@ -213,7 +214,26 @@ impl CutscenePlayer {
         if self.is_playing && self.current_video == Some(video_index - 1) {
             self.stop();
         } else {
-            self.load_video(video_index - 1).await;
+            if self.load_video(video_index - 1).await {
+                self.start_playback().await;
+            }
+        }
+    }
+
+    fn update(&mut self, dt: f32) {
+        if self.is_playing {
+            self.frame_timer += dt;
+            while self.frame_timer >= FRAME_TIME {
+                self.frame_timer -= FRAME_TIME;
+                self.current_frame += 1;
+                if let Some(video_index) = self.current_video {
+                    let total_frames = self.videos[video_index].total_frames;
+                    if self.current_frame >= total_frames {
+                        self.stop();
+                        break;
+                    }
+                }
+            }
         }
     }
 
