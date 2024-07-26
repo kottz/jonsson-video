@@ -21,7 +21,7 @@ def create_sprite_sheets(frames_folder, output_folder, sheet_width, sheet_height
         frames_folder) if f.endswith('.png')])
 
     for sheet_index, i in enumerate(range(0, len(frames), frames_per_sheet)):
-        sheet = Image.new('RGBA', (sheet_width, sheet_height))
+        sheet = Image.new('RGB', (sheet_width, sheet_height))
         sheet_frames = frames[i:i+frames_per_sheet]
 
         for j, frame in enumerate(sheet_frames):
@@ -50,6 +50,21 @@ def compress_sheets(sheets_folder, output_folder):
             subprocess.run(cwebp_command, check=True)
 
 
+def compress_sheets_qoi(sheets_folder, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+    for sheet in os.listdir(sheets_folder):
+        if sheet.endswith('.png'):
+            input_path = os.path.join(sheets_folder, sheet)
+            output_path = os.path.join(
+                output_folder, sheet.replace('.png', '.qoi'))
+            qoi_command = [
+                'magick',
+                input_path,
+                output_path
+            ]
+            subprocess.run(qoi_command, check=True)
+
+
 def extract_audio(video_path, output_path):
     ffmpeg_command = [
         'ffmpeg',
@@ -70,6 +85,7 @@ def process_video(video_path, base_output_folder):
     frames_folder = os.path.join(movie_folder, 'frames')
     png_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'png')
     webp_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'webp')
+    qoi_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'qoi')
     audio_output_path = os.path.join(movie_folder, 'audio.wav')
 
     sheet_width = 1800
@@ -80,6 +96,7 @@ def process_video(video_path, base_output_folder):
     create_sprite_sheets(frames_folder, png_sheets_folder,
                          sheet_width, sheet_height, frames_per_sheet)
     compress_sheets(png_sheets_folder, webp_sheets_folder)
+    compress_sheets_qoi(png_sheets_folder, qoi_sheets_folder)
     extract_audio(video_path, audio_output_path)
 
 

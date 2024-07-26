@@ -8,4 +8,4 @@ Just copy the videos from the disc in the `data/mov` folder into `sheet_generato
 This way of doing it isn't very efficient but the original videos are 15 fps at 600x250 so it works well enough without taking up a huge amount of space.
 I would rather my assets be a few MB larger than going through the hassle of bundling a h264 decoder.
 
-The extractor requires `ffmpeg` and `libwebp` to be installed.
+The extractor requires `ffmpeg`, `imagemagick` and `libwebp` to be installed.
