@@ -24,6 +24,8 @@ struct CutscenePlayer {
     frame_timer: f32,
     is_playing: bool,
     loading_queue: VecDeque<usize>, // sheet_index
+    loading: bool,
+    loading_progress: f32,
 }
 
 impl CutscenePlayer {
@@ -51,25 +53,40 @@ impl CutscenePlayer {
             frame_timer: 0.0,
             is_playing: false,
             loading_queue: VecDeque::new(),
+            loading: false,
+            loading_progress: 0.0,
         }
     }
 
     async fn load_video(&mut self, index: usize) -> bool {
         self.stop();
         self.unload_current_video();
+        self.loading = true;
+        self.loading_progress = 0.0;
 
         let base_path = self.videos[index].base_path.clone();
         let name = self.videos[index].name.clone();
 
+        // Clear the screen once before starting the loading process
+        clear_background(BLACK);
+        self.draw_loading_screen();
+        next_frame().await;
+
         // Load all sprite sheets
         self.sprite_sheets.clear();
         let mut sheet_index = 0;
+        let total_sheets = 100; // Assume 100 sheets max, adjust if needed
         loop {
             let path = Path::new(&base_path).join(format!("sprite_sheet_{:03}.png", sheet_index));
             match load_texture(path.to_str().unwrap()).await {
                 Ok(texture) => {
                     self.sprite_sheets.push_back(Some(texture));
                     sheet_index += 1;
+                    self.loading_progress = sheet_index as f32 / total_sheets as f32;
+
+                    // Update loading screen without clearing the background
+                    self.draw_loading_screen();
+                    next_frame().await;
                 }
                 Err(_) => break,
             }
@@ -87,6 +104,12 @@ impl CutscenePlayer {
         self.current_frame = 0;
         self.frame_timer = 0.0;
         self.is_playing = false;
+        self.loading = false;
+        self.loading_progress = 1.0;
+
+        // Clear the screen one last time after loading is complete
+        clear_background(BLACK);
+        next_frame().await;
 
         true // Return true to indicate successful loading
     }
@@ -141,9 +164,13 @@ impl CutscenePlayer {
     }
 
     fn draw(&self) {
-        clear_background(BLACK);
+        if !self.loading {
+            clear_background(BLACK);
+        }
 
-        if self.is_playing {
+        if self.loading {
+            self.draw_loading_screen();
+        } else if self.is_playing {
             if let Some(_) = self.current_video {
                 // Changed to use underscore
                 let sheet_index = self.current_frame / FRAMES_PER_SHEET;
@@ -210,6 +237,34 @@ impl CutscenePlayer {
         );
     }
 
+    fn draw_loading_screen(&self) {
+        let screen_width = screen_width();
+        let screen_height = screen_height();
+        let bar_width = screen_width * 0.8;
+        let bar_height = 20.0;
+        let bar_x = (screen_width - bar_width) / 2.0;
+        let bar_y = screen_height / 2.0;
+
+        // Draw background bar
+        draw_rectangle(bar_x, bar_y, bar_width, bar_height, GRAY);
+
+        // Draw progress bar
+        let progress_width = bar_width * self.loading_progress;
+        draw_rectangle(bar_x, bar_y, progress_width, bar_height, GREEN);
+
+        // Draw text
+        let text = "Loading...";
+        let font_size = 30.0;
+        let text_dims = measure_text(text, None, font_size as u16, 1.0);
+        draw_text(
+            text,
+            (screen_width - text_dims.width) / 2.0,
+            bar_y - 40.0,
+            font_size,
+            WHITE,
+        );
+    }
+
     async fn toggle(&mut self, video_index: usize) {
         if self.is_playing && self.current_video == Some(video_index - 1) {
             self.stop();
@@ -252,32 +307,33 @@ async fn main() {
     let mut player = CutscenePlayer::new().await;
 
     loop {
-        match get_last_key_pressed() {
-            Some(KeyCode::Q) => break,
-            Some(key) => {
-                match key {
-                    KeyCode::Key1 => player.toggle(1).await,
-                    KeyCode::Key2 => player.toggle(2).await,
-                    KeyCode::Key3 => player.toggle(3).await,
-                    KeyCode::Key4 => player.toggle(4).await,
-                    KeyCode::Key5 => player.toggle(5).await,
-                    KeyCode::Key6 => player.toggle(6).await,
-                    KeyCode::Key7 => player.toggle(7).await,
-                    KeyCode::Key8 => player.toggle(8).await,
-                    KeyCode::Key9 => player.toggle(9).await,
-                    KeyCode::Key0 => player.toggle(10).await,
-                    _ => (), // Ignore other keys
+        if !player.loading {
+            match get_last_key_pressed() {
+                Some(KeyCode::Q) => break,
+                Some(key) => {
+                    match key {
+                        KeyCode::Key1 => player.toggle(1).await,
+                        KeyCode::Key2 => player.toggle(2).await,
+                        KeyCode::Key3 => player.toggle(3).await,
+                        KeyCode::Key4 => player.toggle(4).await,
+                        KeyCode::Key5 => player.toggle(5).await,
+                        KeyCode::Key6 => player.toggle(6).await,
+                        KeyCode::Key7 => player.toggle(7).await,
+                        KeyCode::Key8 => player.toggle(8).await,
+                        KeyCode::Key9 => player.toggle(9).await,
+                        KeyCode::Key0 => player.toggle(10).await,
+                        _ => (), // Ignore other keys
+                    }
                 }
+                None => (), // No key pressed
             }
-            None => (), // No key pressed
         }
 
         player.update(get_frame_time());
         player.draw();
-        player.load_next_texture().await;
 
-        next_frame().await
+        next_frame().await;
     }
 
-    player.unload_current_video();
+    player.stop();
 }
