@@ -2,6 +2,8 @@ use macroquad::prelude::*;
 use std::collections::VecDeque;
 use std::path::Path;
 
+const CURRENT_FORMAT: &str = "png"; // png/webp
+
 const FRAMES_PER_SHEET: usize = 24;
 const FPS: f32 = 15.0;
 const FRAME_TIME: f32 = 1.0 / FPS;
@@ -37,7 +39,7 @@ impl CutscenePlayer {
             .into_iter()
             .map(|name| VideoMetadata {
                 name: name.to_string(),
-                base_path: format!("movies/{}/sprite_sheets/png", name),
+                base_path: format!("movies/{}/sprite_sheets/{}", name, CURRENT_FORMAT),
                 total_frames: 100 * FRAMES_PER_SHEET, // Assume 100 sheets max, update this if needed
             })
             .collect();
@@ -75,7 +77,10 @@ impl CutscenePlayer {
         // Load all sprite sheets
         self.sprite_sheets.clear();
         for sheet_index in 0..total_sheets {
-            let path = Path::new(&base_path).join(format!("sprite_sheet_{:03}.png", sheet_index));
+            let path = Path::new(&base_path).join(format!(
+                "sprite_sheet_{:03}.{}",
+                sheet_index, CURRENT_FORMAT
+            ));
             match load_texture(path.to_str().unwrap()).await {
                 Ok(texture) => {
                     self.sprite_sheets.push_back(Some(texture));
@@ -114,7 +119,8 @@ impl CutscenePlayer {
     async fn count_sprite_sheets(&self, base_path: &str) -> usize {
         let mut count = 0;
         loop {
-            let path = Path::new(base_path).join(format!("sprite_sheet_{:03}.png", count));
+            let path =
+                Path::new(base_path).join(format!("sprite_sheet_{:03}.{}", count, CURRENT_FORMAT));
             if !path.exists() {
                 break;
             }
@@ -164,7 +170,7 @@ impl CutscenePlayer {
         }
 
         if self.loading {
-            if let Some(video_index) = self.current_video {
+            if let Some(_video_index) = self.current_video {
                 let total_sheets = self.sprite_sheets.len();
                 self.draw_loading_screen(total_sheets);
             }
