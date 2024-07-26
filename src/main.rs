@@ -7,7 +7,6 @@ const FPS: f32 = 15.0;
 const FRAME_TIME: f32 = 1.0 / FPS;
 const ORIGINAL_WIDTH: f32 = 600.0;
 const ORIGINAL_HEIGHT: f32 = 250.0;
-const PRELOAD_SHEETS: usize = 4;
 
 struct VideoMetadata {
     name: String,
@@ -23,7 +22,6 @@ struct CutscenePlayer {
     current_frame: usize,
     frame_timer: f32,
     is_playing: bool,
-    loading_queue: VecDeque<usize>, // sheet_index
     loading: bool,
     loading_progress: f32,
 }
@@ -52,7 +50,6 @@ impl CutscenePlayer {
             current_frame: 0,
             frame_timer: 0.0,
             is_playing: false,
-            loading_queue: VecDeque::new(),
             loading: false,
             loading_progress: 0.0,
         }
@@ -67,25 +64,25 @@ impl CutscenePlayer {
         let base_path = self.videos[index].base_path.clone();
         let name = self.videos[index].name.clone();
 
+        // Count the number of sprite sheets
+        let total_sheets = self.count_sprite_sheets(&base_path).await;
+
         // Clear the screen once before starting the loading process
         clear_background(BLACK);
-        self.draw_loading_screen();
+        self.draw_loading_screen(total_sheets);
         next_frame().await;
 
         // Load all sprite sheets
         self.sprite_sheets.clear();
-        let mut sheet_index = 0;
-        let total_sheets = 100; // Assume 100 sheets max, adjust if needed
-        loop {
+        for sheet_index in 0..total_sheets {
             let path = Path::new(&base_path).join(format!("sprite_sheet_{:03}.png", sheet_index));
             match load_texture(path.to_str().unwrap()).await {
                 Ok(texture) => {
                     self.sprite_sheets.push_back(Some(texture));
-                    sheet_index += 1;
-                    self.loading_progress = sheet_index as f32 / total_sheets as f32;
+                    self.loading_progress = (sheet_index + 1) as f32 / total_sheets as f32;
 
                     // Update loading screen without clearing the background
-                    self.draw_loading_screen();
+                    self.draw_loading_screen(total_sheets);
                     next_frame().await;
                 }
                 Err(_) => break,
@@ -112,6 +109,18 @@ impl CutscenePlayer {
         next_frame().await;
 
         true // Return true to indicate successful loading
+    }
+
+    async fn count_sprite_sheets(&self, base_path: &str) -> usize {
+        let mut count = 0;
+        loop {
+            let path = Path::new(base_path).join(format!("sprite_sheet_{:03}.png", count));
+            if !path.exists() {
+                break;
+            }
+            count += 1;
+        }
+        count
     }
 
     async fn start_playback(&mut self) {
@@ -141,20 +150,6 @@ impl CutscenePlayer {
             self.is_playing = true;
         }
     }
-    async fn load_next_texture(&mut self) {
-        if let Some(sheet_index) = self.loading_queue.pop_front() {
-            if let Some(video_index) = self.current_video {
-                let metadata = &self.videos[video_index];
-                let path = Path::new(&metadata.base_path)
-                    .join(format!("sprite_sheet_{:03}.png", sheet_index));
-                if let Ok(texture) = load_texture(path.to_str().unwrap()).await {
-                    if sheet_index < self.sprite_sheets.len() {
-                        self.sprite_sheets[sheet_index] = Some(texture);
-                    }
-                }
-            }
-        }
-    }
 
     fn unload_current_video(&mut self) {
         self.sprite_sheets.clear();
@@ -169,7 +164,10 @@ impl CutscenePlayer {
         }
 
         if self.loading {
-            self.draw_loading_screen();
+            if let Some(video_index) = self.current_video {
+                let total_sheets = self.sprite_sheets.len();
+                self.draw_loading_screen(total_sheets);
+            }
         } else if self.is_playing {
             if let Some(_) = self.current_video {
                 // Changed to use underscore
@@ -237,7 +235,7 @@ impl CutscenePlayer {
         );
     }
 
-    fn draw_loading_screen(&self) {
+    fn draw_loading_screen(&self, total_sheets: usize) {
         let screen_width = screen_width();
         let screen_height = screen_height();
         let bar_width = screen_width * 0.8;
@@ -248,16 +246,20 @@ impl CutscenePlayer {
         // Draw background bar
         draw_rectangle(bar_x, bar_y, bar_width, bar_height, GRAY);
 
-        // Draw progress bar
-        let progress_width = bar_width * self.loading_progress;
-        draw_rectangle(bar_x, bar_y, progress_width, bar_height, GREEN);
+        // Draw progress blocks
+        let block_width = bar_width / total_sheets as f32;
+        let loaded_sheets = (self.loading_progress * total_sheets as f32).ceil() as usize;
+        for i in 0..loaded_sheets {
+            let block_x = bar_x + i as f32 * block_width;
+            draw_rectangle(block_x, bar_y, block_width, bar_height, GREEN);
+        }
 
         // Draw text
-        let text = "Loading...";
+        let text = format!("Loading... {}/{}", loaded_sheets, total_sheets);
         let font_size = 30.0;
-        let text_dims = measure_text(text, None, font_size as u16, 1.0);
+        let text_dims = measure_text(&text, None, font_size as u16, 1.0);
         draw_text(
-            text,
+            &text,
             (screen_width - text_dims.width) / 2.0,
             bar_y - 40.0,
             font_size,
