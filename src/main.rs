@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
 
-const CURRENT_FORMAT: &str = "webp"; // Change this to "png" to use PNG format
+const CURRENT_FORMAT: &str = "qoi"; // png/webp/qoi
 
 const FRAMES_PER_SHEET: usize = 24;
 const FPS: f32 = 15.0;
@@ -41,7 +41,7 @@ impl CutscenePlayer {
             .into_iter()
             .map(|name| VideoMetadata {
                 name: name.to_string(),
-                base_path: format!("movies/{}/sprite_sheets/{}", name, CURRENT_FORMAT),
+                base_path: format!("sheet_generator/movies/{}/sprite_sheets/{}", name, CURRENT_FORMAT),
                 total_frames: 100 * FRAMES_PER_SHEET, // Assume 100 sheets max, update this if needed
             })
             .collect();
@@ -101,7 +101,7 @@ impl CutscenePlayer {
         // Update total frames based on actual loaded sheets
         self.videos[index].total_frames = self.sprite_sheets.len() * FRAMES_PER_SHEET;
 
-        let audio_path = Path::new("movies").join(&name).join("audio.wav");
+        let audio_path = Path::new("sheet_generator/movies").join(&name).join("audio.wav");
         self.audio = macroquad::audio::load_sound(audio_path.to_str().unwrap())
             .await
             .ok();
