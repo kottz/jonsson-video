@@ -64,6 +64,19 @@ def compress_sheets_qoi(sheets_folder, output_folder):
             ]
             subprocess.run(qoi_command, check=True)
 
+def compress_sheets_avif(sheets_folder, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+    for sheet in os.listdir(sheets_folder):
+        if sheet.endswith('.png'):
+            input_path = os.path.join(sheets_folder, sheet)
+            output_path = os.path.join(
+                output_folder, sheet.replace('.png', '.avif'))
+            qoi_command = [
+                'magick',
+                input_path,
+                output_path
+            ]
+            subprocess.run(qoi_command, check=True)
 
 def extract_audio(video_path, output_path):
     ffmpeg_command = [
@@ -86,6 +99,7 @@ def process_video(video_path, base_output_folder):
     png_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'png')
     webp_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'webp')
     qoi_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'qoi')
+    avif_sheets_folder = os.path.join(movie_folder, 'sprite_sheets', 'avif')
     audio_output_path = os.path.join(movie_folder, 'audio.wav')
 
     sheet_width = 1800
@@ -97,6 +111,7 @@ def process_video(video_path, base_output_folder):
                          sheet_width, sheet_height, frames_per_sheet)
     compress_sheets(png_sheets_folder, webp_sheets_folder)
     compress_sheets_qoi(png_sheets_folder, qoi_sheets_folder)
+    compress_sheets_avif(png_sheets_folder, avif_sheets_folder)
     extract_audio(video_path, audio_output_path)
 
 

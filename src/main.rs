@@ -1,15 +1,17 @@
 use macroquad::prelude::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
+use image::{DynamicImage, ImageFormat};
 
-const CURRENT_FORMAT: &str = "png"; // png/webp/qoi
-
+const CURRENT_FORMAT: &str = "avif";
 const FRAMES_PER_SHEET: usize = 24;
 const FPS: f32 = 15.0;
 const FRAME_TIME: f32 = 1.0 / FPS;
 const ORIGINAL_WIDTH: f32 = 600.0;
 const ORIGINAL_HEIGHT: f32 = 250.0;
+const MAX_LOADS_PER_FRAME: usize = 1; // Limit background processing
 
 struct VideoMetadata {
     name: String,
@@ -17,10 +19,40 @@ struct VideoMetadata {
     total_frames: usize,
 }
 
+struct BackgroundLoader {
+    sender: Sender<(usize, DynamicImage, usize)>,
+    receiver: Receiver<(usize, DynamicImage, usize)>,
+}
+
+impl BackgroundLoader {
+    fn new() -> Self {
+        let (sender, receiver) = channel();
+        Self { sender, receiver }
+    }
+
+    fn start_loading(&self, video_index: usize, base_path: String, sheet_index: usize) {
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let path = Path::new(&base_path)
+                .join(format!("sprite_sheet_{:03}.{}", sheet_index, CURRENT_FORMAT));
+            
+            // Read and decode image in background
+            if let Ok(data) = std::fs::read(&path) {
+                if let Ok(format) = ImageFormat::from_path(&path) {
+                    if let Ok(img) = image::load_from_memory_with_format(&data, format) {
+                        let _ = sender.send((video_index, img, sheet_index));
+                    }
+                }
+            }
+        });
+    }
+}
+
 struct CutscenePlayer {
     videos: Vec<VideoMetadata>,
     current_video: Option<usize>,
-    sprite_sheets: VecDeque<Option<Texture2D>>,
+    sprite_sheets: HashMap<usize, VecDeque<Option<Texture2D>>>,
+    background_loader: BackgroundLoader,
     audio: Option<macroquad::audio::Sound>,
     playback_start_time: Option<Instant>,
     current_frame: usize,
@@ -28,6 +60,8 @@ struct CutscenePlayer {
     loading: bool,
     loading_progress: f32,
     loading_start_time: Option<Instant>,
+    loading_queue: VecDeque<(usize, usize)>,
+    show_menu: bool,
 }
 
 impl CutscenePlayer {
@@ -45,14 +79,15 @@ impl CutscenePlayer {
                     "sheet_generator/movies/{}/sprite_sheets/{}",
                     name, CURRENT_FORMAT
                 ),
-                total_frames: 100 * FRAMES_PER_SHEET, // Assume 100 sheets max, update this if needed
+                total_frames: 100 * FRAMES_PER_SHEET,
             })
             .collect();
 
         Self {
             videos,
             current_video: None,
-            sprite_sheets: VecDeque::new(),
+            sprite_sheets: HashMap::new(),
+            background_loader: BackgroundLoader::new(),
             audio: None,
             current_frame: 0,
             playback_start_time: None,
@@ -60,65 +95,9 @@ impl CutscenePlayer {
             loading: false,
             loading_progress: 0.0,
             loading_start_time: None,
+            loading_queue: VecDeque::new(),
+            show_menu: true,
         }
-    }
-
-    async fn load_video(&mut self, index: usize) -> bool {
-        self.stop();
-        self.unload_current_video();
-        self.loading = true;
-        self.loading_progress = 0.0;
-        self.loading_start_time = Some(Instant::now());
-
-        let base_path = self.videos[index].base_path.clone();
-        let name = self.videos[index].name.clone();
-
-        let total_sheets = self.count_sprite_sheets(&base_path).await;
-
-        clear_background(BLACK);
-        self.draw_loading_screen(total_sheets);
-        next_frame().await;
-
-        // Load all sprite sheets
-        self.sprite_sheets.clear();
-        for sheet_index in 0..total_sheets {
-            let path = Path::new(&base_path).join(format!(
-                "sprite_sheet_{:03}.{}",
-                sheet_index, CURRENT_FORMAT
-            ));
-            match load_texture(path.to_str().unwrap()).await {
-                Ok(texture) => {
-                    self.sprite_sheets.push_back(Some(texture));
-                    self.loading_progress = (sheet_index + 1) as f32 / total_sheets as f32;
-
-                    self.draw_loading_screen(total_sheets);
-                    next_frame().await;
-                }
-                Err(_) => break,
-            }
-        }
-
-        self.videos[index].total_frames = self.sprite_sheets.len() * FRAMES_PER_SHEET;
-
-        let audio_path = Path::new("sheet_generator/movies")
-            .join(&name)
-            .join("audio.wav");
-        self.audio = macroquad::audio::load_sound(audio_path.to_str().unwrap())
-            .await
-            .ok();
-
-        self.current_video = Some(index);
-        self.current_frame = 0;
-        self.is_playing = false;
-        self.loading = false;
-        self.loading_progress = 1.0;
-
-        clear_background(BLACK);
-        self.draw_loading_screen(total_sheets);
-        next_frame().await;
-
-        self.loading_start_time = None;
-        true
     }
 
     async fn count_sprite_sheets(&self, base_path: &str) -> usize {
@@ -134,12 +113,109 @@ impl CutscenePlayer {
         count
     }
 
+    async fn load_video(&mut self, index: usize) -> bool {
+        self.stop();
+        self.unload_current_video();
+        self.loading = true;
+        self.loading_progress = 0.0;
+        self.loading_start_time = Some(Instant::now());
+        self.show_menu = false;
+
+        let base_path = self.videos[index].base_path.clone();
+        let name = self.videos[index].name.clone();
+
+        let total_sheets = self.count_sprite_sheets(&base_path).await;
+        self.videos[index].total_frames = total_sheets * FRAMES_PER_SHEET;
+
+        // Initialize video's sprite sheets storage
+        self.sprite_sheets.insert(index, VecDeque::new());
+
+        // Load first sheet immediately for playback
+        let first_sheet_path =
+            Path::new(&base_path).join(format!("sprite_sheet_000.{}", CURRENT_FORMAT));
+        if let Ok(texture) = load_texture(first_sheet_path.to_str().unwrap()).await {
+            if let Some(sheets) = self.sprite_sheets.get_mut(&index) {
+                sheets.push_back(Some(texture));
+            }
+        }
+
+        // Queue remaining sheets for background loading
+        self.loading_queue.clear();
+        for sheet_index in 1..total_sheets {
+            self.loading_queue.push_back((index, sheet_index));
+        }
+
+        // Start loading next sheet in background
+        self.start_next_background_load();
+
+        // Load audio
+        let audio_path = Path::new("sheet_generator/movies")
+            .join(&name)
+            .join("audio.wav");
+        self.audio = macroquad::audio::load_sound(audio_path.to_str().unwrap())
+            .await
+            .ok();
+
+        self.current_video = Some(index);
+        self.current_frame = 0;
+        self.loading = false;
+
+        true
+    }
+
+    fn unload_current_video(&mut self) {
+        if let Some(video_index) = self.current_video {
+            if let Some(audio) = self.audio.take() {
+                macroquad::audio::stop_sound(&audio);
+            }
+            self.sprite_sheets.remove(&video_index);
+        }
+        self.loading_queue.clear();
+    }
+
+    fn start_next_background_load(&mut self) {
+        if let Some((video_index, sheet_index)) = self.loading_queue.front() {
+            let base_path = self.videos[*video_index].base_path.clone();
+            self.background_loader
+                .start_loading(*video_index, base_path, *sheet_index);
+        }
+    }
+
+    fn process_background_loads(&mut self) {
+        while let Ok((video_index, img, sheet_index)) = self.background_loader.receiver.try_recv() {
+            if let Some(sheets) = self.sprite_sheets.get_mut(&video_index) {
+                // Convert decoded image to RGBA
+                let rgba = img.to_rgba8();
+                let width = img.width();
+                let height = img.height();
+
+                // Just create texture from decoded data - this is fast
+                let texture = Texture2D::from_rgba8(width as u16, height as u16, &rgba);
+                sheets.push_back(Some(texture));
+
+                if let Some(current_video) = self.current_video {
+                    if current_video == video_index {
+                        let total_sheets = self.loading_queue.len() + sheets.len();
+                        self.loading_progress = sheets.len() as f32 / total_sheets as f32;
+                    }
+                }
+            }
+
+            if let Some(front) = self.loading_queue.front() {
+                if front.0 == video_index && front.1 == sheet_index {
+                    self.loading_queue.pop_front();
+                    self.start_next_background_load();
+                }
+            }
+        }
+    }
+
     async fn start_playback(&mut self) {
         if let Some(_) = self.current_video {
             self.current_frame = 0;
             self.playback_start_time = Some(Instant::now());
+            self.show_menu = false;
 
-            // Start audio playback
             if let Some(audio) = &self.audio {
                 macroquad::audio::play_sound(
                     audio,
@@ -150,30 +226,40 @@ impl CutscenePlayer {
                 );
             }
 
-            // Start video playback
             self.is_playing = true;
         }
     }
 
-    fn unload_current_video(&mut self) {
-        self.sprite_sheets.clear();
-        if let Some(audio) = self.audio.take() {
-            macroquad::audio::stop_sound(&audio);
+    fn stop(&mut self) {
+        if let Some(audio) = &self.audio {
+            macroquad::audio::stop_sound(audio);
+        }
+        self.is_playing = false;
+        self.current_frame = 0;
+        self.playback_start_time = None;
+        self.show_menu = true;
+    }
+
+    async fn toggle(&mut self, video_index: usize) {
+        if self.is_playing && self.current_video == Some(video_index - 1) {
+            self.stop();
+        } else {
+            if self.load_video(video_index - 1).await {
+                self.start_playback().await;
+            }
         }
     }
 
     fn draw(&self) {
-        if !self.loading {
-            clear_background(BLACK);
+        clear_background(BLACK);
+
+        if self.show_menu {
+            self.draw_menu();
+            return;
         }
 
-        if self.loading {
-            if let Some(_video_index) = self.current_video {
-                let total_sheets = self.sprite_sheets.len();
-                self.draw_loading_screen(total_sheets);
-            }
-        } else if self.is_playing {
-            if let Some(_) = self.current_video {
+        if self.is_playing {
+            if let Some(video_index) = self.current_video {
                 let sheet_index = self.current_frame / FRAMES_PER_SHEET;
                 let frame_in_sheet = self.current_frame % FRAMES_PER_SHEET;
                 let row = frame_in_sheet / 3;
@@ -193,22 +279,27 @@ impl CutscenePlayer {
                 let x = (screen_w - scaled_w) / 2.0;
                 let y = (screen_h - scaled_h) / 2.0;
 
-                if let Some(Some(texture)) = self.sprite_sheets.get(sheet_index) {
-                    draw_texture_ex(
-                        texture,
-                        x,
-                        y,
-                        WHITE,
-                        DrawTextureParams {
-                            dest_size: Some(vec2(scaled_w, scaled_h)),
-                            source: Some(src_rect),
-                            ..Default::default()
-                        },
-                    );
+                if let Some(sheets) = self.sprite_sheets.get(&video_index) {
+                    if let Some(Some(texture)) = sheets.get(sheet_index) {
+                        draw_texture_ex(
+                            texture,
+                            x,
+                            y,
+                            WHITE,
+                            DrawTextureParams {
+                                dest_size: Some(vec2(scaled_w, scaled_h)),
+                                source: Some(src_rect),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+
+                // Draw loading progress if still loading sheets
+                if !self.loading_queue.is_empty() {
+                    self.draw_loading_progress();
                 }
             }
-        } else {
-            self.draw_menu();
         }
     }
 
@@ -238,68 +329,27 @@ impl CutscenePlayer {
         );
     }
 
-    fn draw_loading_screen(&self, total_sheets: usize) {
-        let screen_width = screen_width();
-        let screen_height = screen_height();
-        let bar_width = screen_width * 0.8;
-        let bar_height = 20.0;
-        let bar_x = (screen_width - bar_width) / 2.0;
-        let bar_y = screen_height / 2.0;
+    fn draw_loading_progress(&self) {
+        let progress_height = 4.0;
+        let progress_width = screen_width();
+        let y = screen_height() - progress_height;
 
-        // Draw background bar
-        draw_rectangle(bar_x, bar_y, bar_width, bar_height, GRAY);
+        // Background
+        draw_rectangle(0.0, y, progress_width, progress_height, GRAY);
 
-        // Draw progress blocks
-        let block_width = bar_width / total_sheets as f32;
-        let loaded_sheets = (self.loading_progress * total_sheets as f32).ceil() as usize;
-        for i in 0..loaded_sheets {
-            let block_x = bar_x + i as f32 * block_width;
-            draw_rectangle(block_x, bar_y, block_width, bar_height, GREEN);
-        }
-
-        // Draw text
-        let text = format!("Loading... {}/{}", loaded_sheets, total_sheets);
-        let font_size = 30.0;
-        let text_dims = measure_text(&text, None, font_size as u16, 1.0);
-        draw_text(
-            &text,
-            (screen_width - text_dims.width) / 2.0,
-            bar_y - 40.0,
-            font_size,
-            WHITE,
-        );
-
-        // Draw stopwatch
-        if let Some(start_time) = self.loading_start_time {
-            let elapsed = start_time.elapsed();
-            let stopwatch_text = format!(
-                "Time: {:02}:{:02}.{:03}",
-                elapsed.as_secs() / 60,
-                elapsed.as_secs() % 60,
-                elapsed.subsec_millis()
-            );
-            let stopwatch_dims = measure_text(&stopwatch_text, None, font_size as u16, 1.0);
-            draw_text(
-                &stopwatch_text,
-                (screen_width - stopwatch_dims.width) / 2.0,
-                bar_y + 40.0,
-                font_size,
-                WHITE,
-            );
-        }
-    }
-
-    async fn toggle(&mut self, video_index: usize) {
-        if self.is_playing && self.current_video == Some(video_index - 1) {
-            self.stop();
-        } else {
-            if self.load_video(video_index - 1).await {
-                self.start_playback().await;
+        // Progress bar
+        if let Some(video_index) = self.current_video {
+            if let Some(sheets) = self.sprite_sheets.get(&video_index) {
+                let total_sheets = self.loading_queue.len() + sheets.len();
+                let progress = sheets.len() as f32 / total_sheets as f32;
+                draw_rectangle(0.0, y, progress_width * progress, progress_height, GREEN);
             }
         }
     }
 
-    fn update(&mut self) {
+    async fn update(&mut self) {
+        self.process_background_loads();
+
         if self.is_playing {
             if let Some(start_time) = self.playback_start_time {
                 let elapsed = start_time.elapsed();
@@ -316,15 +366,6 @@ impl CutscenePlayer {
             }
         }
     }
-
-    fn stop(&mut self) {
-        if let Some(audio) = &self.audio {
-            macroquad::audio::stop_sound(audio);
-        }
-        self.is_playing = false;
-        self.current_frame = 0;
-        self.playback_start_time = None;
-    }
 }
 
 #[macroquad::main("Multi-Video Cutscene Player")]
@@ -335,30 +376,27 @@ async fn main() {
         if !player.loading {
             match get_last_key_pressed() {
                 Some(KeyCode::Q) => break,
-                Some(key) => {
-                    match key {
-                        KeyCode::Key1 => player.toggle(1).await,
-                        KeyCode::Key2 => player.toggle(2).await,
-                        KeyCode::Key3 => player.toggle(3).await,
-                        KeyCode::Key4 => player.toggle(4).await,
-                        KeyCode::Key5 => player.toggle(5).await,
-                        KeyCode::Key6 => player.toggle(6).await,
-                        KeyCode::Key7 => player.toggle(7).await,
-                        KeyCode::Key8 => player.toggle(8).await,
-                        KeyCode::Key9 => player.toggle(9).await,
-                        KeyCode::Key0 => player.toggle(10).await,
-                        _ => (), // Ignore other keys
-                    }
-                }
-                None => (), // No key pressed
+                Some(key) => match key {
+                    KeyCode::Key1 => player.toggle(1).await,
+                    KeyCode::Key2 => player.toggle(2).await,
+                    KeyCode::Key3 => player.toggle(3).await,
+                    KeyCode::Key4 => player.toggle(4).await,
+                    KeyCode::Key5 => player.toggle(5).await,
+                    KeyCode::Key6 => player.toggle(6).await,
+                    KeyCode::Key7 => player.toggle(7).await,
+                    KeyCode::Key8 => player.toggle(8).await,
+                    KeyCode::Key9 => player.toggle(9).await,
+                    KeyCode::Key0 => player.toggle(10).await,
+                    _ => (),
+                },
+                None => (),
             }
         }
 
-        player.update();
+        player.update().await;
         player.draw();
 
         next_frame().await;
     }
-
     player.stop();
 }
